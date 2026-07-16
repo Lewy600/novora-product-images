@@ -21,6 +21,9 @@ on:
         type: string
         default: '1:1'
 
+permissions:
+  contents: write
+
 jobs:
   generate:
     runs-on: ubuntu-latest
