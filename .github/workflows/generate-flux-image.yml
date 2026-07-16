@@ -33,36 +33,48 @@ jobs:
         env:
           BFL_API_KEY: ${{ secrets.BFL_API_KEY }}
         run: |
-          if [ -n "${{ inputs.reference_image_url }}" ]; then
-            curl -s -X POST "https://api.bfl.ai/v1/flux-kontext-pro" \
-              -H "accept: application/json" \
-              -H "x-key: $BFL_API_KEY" \
-              -H "Content-Type: application/json" \
-              -d "{\"prompt\": $(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "${{ inputs.prompt }}"), \"input_image\": null, \"aspect_ratio\": \"${{ inputs.aspect_ratio }}\"}" \
-              > response.json
-          else
-            curl -s -X POST "https://api.bfl.ai/v1/flux-pro-1.1" \
-              -H "accept: application/json" \
-              -H "x-key: $BFL_API_KEY" \
-              -H "Content-Type: application/json" \
-              -d "{\"prompt\": $(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "${{ inputs.prompt }}"), \"aspect_ratio\": \"${{ inputs.aspect_ratio }}\"}" \
-              > response.json
-          fi
+          python3 << 'PYEOF'
+          import json, os, subprocess
+          prompt = os.environ.get('PROMPT_INPUT')
+          ref_img = os.environ.get('REF_IMG_INPUT')
+          aspect = os.environ.get('ASPECT_INPUT')
+          payload = {"prompt": prompt, "aspect_ratio": aspect}
+          endpoint = "https://api.bfl.ai/v1/flux-pro-1.1"
+          if ref_img:
+              payload["input_image"] = ref_img
+              endpoint = "https://api.bfl.ai/v1/flux-kontext-pro"
+          with open('payload.json', 'w') as f:
+              json.dump(payload, f)
+          with open('endpoint.txt', 'w') as f:
+              f.write(endpoint)
+          PYEOF
+          curl -s -X POST "$(cat endpoint.txt)" \
+            -H "accept: application/json" \
+            -H "x-key: $BFL_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d @payload.json \
+            > response.json
           cat response.json
-          echo "request_id=$(python3 -c "import json; print(json.load(open('response.json'))['id'])")" >> $GITHUB_OUTPUT
-          echo "polling_url=$(python3 -c "import json; print(json.load(open('response.json'))['polling_url'])")" >> $GITHUB_OUTPUT
+        env:
+          BFL_API_KEY: ${{ secrets.BFL_API_KEY }}
+          PROMPT_INPUT: ${{ inputs.prompt }}
+          REF_IMG_INPUT: ${{ inputs.reference_image_url }}
+          ASPECT_INPUT: ${{ inputs.aspect_ratio }}
 
       - name: Poll for result
         id: poll
         env:
           BFL_API_KEY: ${{ secrets.BFL_API_KEY }}
         run: |
-          for i in $(seq 1 30); do
+          POLLING_URL=$(python3 -c "import json; print(json.load(open('response.json')).get('polling_url',''))")
+          echo "Polling URL: $POLLING_URL"
+          if [ -z "$POLLING_URL" ]; then
+            echo "No polling_url in response - submission likely failed"
+            exit 0
+          fi
+          for i in $(seq 1 20); do
             sleep 3
-            curl -s -X GET "${{ steps.submit.outputs.polling_url }}" \
-              -H "accept: application/json" \
-              -H "x-key: $BFL_API_KEY" \
-              > poll_result.json
+            curl -s -X GET "$POLLING_URL" -H "accept: application/json" -H "x-key: $BFL_API_KEY" > poll_result.json
             STATUS=$(python3 -c "import json; print(json.load(open('poll_result.json')).get('status',''))")
             echo "Poll $i: status=$STATUS"
             if [ "$STATUS" == "Ready" ]; then
@@ -70,19 +82,19 @@ jobs:
               echo "image_url=$IMAGE_URL" >> $GITHUB_OUTPUT
               break
             fi
-            if [ "$STATUS" == "Error" ] || [ "$STATUS" == "Failed" ]; then
-              echo "Generation failed"
-              cat poll_result.json
-              exit 1
-            fi
           done
 
-      - name: Download and commit image
+      - name: Commit debug info and image
+        if: always()
         run: |
-          mkdir -p products
-          curl -s -o "products/${{ inputs.filename }}" "${{ steps.poll.outputs.image_url }}"
+          mkdir -p debug products
+          cp response.json debug/last_response.json || true
+          cp poll_result.json debug/last_poll_result.json || true
+          if [ -n "${{ steps.poll.outputs.image_url }}" ]; then
+            curl -s -o "products/${{ inputs.filename }}" "${{ steps.poll.outputs.image_url }}"
+          fi
           git config user.name "FLUX Bot"
           git config user.email "flux-bot@example.com"
-          git add "products/${{ inputs.filename }}"
-          git commit -m "Add FLUX generated image: ${{ inputs.filename }}"
+          git add debug/ products/ 2>/dev/null || true
+          git commit -m "Debug + result for ${{ inputs.filename }}" || echo "nothing to commit"
           git push
