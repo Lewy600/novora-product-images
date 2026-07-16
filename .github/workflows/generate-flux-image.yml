@@ -32,9 +32,12 @@ jobs:
         id: submit
         env:
           BFL_API_KEY: ${{ secrets.BFL_API_KEY }}
+          PROMPT_INPUT: ${{ inputs.prompt }}
+          REF_IMG_INPUT: ${{ inputs.reference_image_url }}
+          ASPECT_INPUT: ${{ inputs.aspect_ratio }}
         run: |
           python3 << 'PYEOF'
-          import json, os, subprocess
+          import json, os
           prompt = os.environ.get('PROMPT_INPUT')
           ref_img = os.environ.get('REF_IMG_INPUT')
           aspect = os.environ.get('ASPECT_INPUT')
@@ -55,11 +58,6 @@ jobs:
             -d @payload.json \
             > response.json
           cat response.json
-        env:
-          BFL_API_KEY: ${{ secrets.BFL_API_KEY }}
-          PROMPT_INPUT: ${{ inputs.prompt }}
-          REF_IMG_INPUT: ${{ inputs.reference_image_url }}
-          ASPECT_INPUT: ${{ inputs.aspect_ratio }}
 
       - name: Poll for result
         id: poll
