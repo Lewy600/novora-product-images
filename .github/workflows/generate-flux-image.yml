@@ -1,0 +1,88 @@
+name: Generate FLUX Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: 'Image generation prompt'
+        required: true
+        type: string
+      filename:
+        description: 'Output filename (e.g. product-name-hero.png)'
+        required: true
+        type: string
+      reference_image_url:
+        description: 'Optional reference image URL for image-to-image'
+        required: false
+        type: string
+      aspect_ratio:
+        description: 'Aspect ratio'
+        required: false
+        type: string
+        default: '1:1'
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Submit FLUX generation request
+        id: submit
+        env:
+          BFL_API_KEY: ${{ secrets.BFL_API_KEY }}
+        run: |
+          if [ -n "${{ inputs.reference_image_url }}" ]; then
+            curl -s -X POST "https://api.bfl.ai/v1/flux-kontext-pro" \
+              -H "accept: application/json" \
+              -H "x-key: $BFL_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d "{\"prompt\": $(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "${{ inputs.prompt }}"), \"input_image\": null, \"aspect_ratio\": \"${{ inputs.aspect_ratio }}\"}" \
+              > response.json
+          else
+            curl -s -X POST "https://api.bfl.ai/v1/flux-pro-1.1" \
+              -H "accept: application/json" \
+              -H "x-key: $BFL_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d "{\"prompt\": $(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "${{ inputs.prompt }}"), \"aspect_ratio\": \"${{ inputs.aspect_ratio }}\"}" \
+              > response.json
+          fi
+          cat response.json
+          echo "request_id=$(python3 -c "import json; print(json.load(open('response.json'))['id'])")" >> $GITHUB_OUTPUT
+          echo "polling_url=$(python3 -c "import json; print(json.load(open('response.json'))['polling_url'])")" >> $GITHUB_OUTPUT
+
+      - name: Poll for result
+        id: poll
+        env:
+          BFL_API_KEY: ${{ secrets.BFL_API_KEY }}
+        run: |
+          for i in $(seq 1 30); do
+            sleep 3
+            curl -s -X GET "${{ steps.submit.outputs.polling_url }}" \
+              -H "accept: application/json" \
+              -H "x-key: $BFL_API_KEY" \
+              > poll_result.json
+            STATUS=$(python3 -c "import json; print(json.load(open('poll_result.json')).get('status',''))")
+            echo "Poll $i: status=$STATUS"
+            if [ "$STATUS" == "Ready" ]; then
+              IMAGE_URL=$(python3 -c "import json; print(json.load(open('poll_result.json'))['result']['sample'])")
+              echo "image_url=$IMAGE_URL" >> $GITHUB_OUTPUT
+              break
+            fi
+            if [ "$STATUS" == "Error" ] || [ "$STATUS" == "Failed" ]; then
+              echo "Generation failed"
+              cat poll_result.json
+              exit 1
+            fi
+          done
+
+      - name: Download and commit image
+        run: |
+          mkdir -p products
+          curl -s -o "products/${{ inputs.filename }}" "${{ steps.poll.outputs.image_url }}"
+          git config user.name "FLUX Bot"
+          git config user.email "flux-bot@example.com"
+          git add "products/${{ inputs.filename }}"
+          git commit -m "Add FLUX generated image: ${{ inputs.filename }}"
+          git push
